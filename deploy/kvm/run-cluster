@@ -107,6 +107,15 @@ main() {
         fi
     done
 
+    # for each VM we create, we need to have a unique CIDR, gateway, and DNS entry for the VM's network configuration; 
+    # we will use these to create the cloud-init iso for each VM, and we will also need to know which node to deploy the VM on so we can clone the template there and launch the VM on that node
+    echo "> checking array sizes ...."
+    if [ "${#VM_CIDRS[@]}" -lt "$NUM_VMS" ] || [ "${#VM_GATEWAYS[@]}" -lt "$NUM_VMS" ] || [ "${#VM_DNSS[@]}" -lt "$NUM_VMS" ]; then
+        echo "error: insufficient number of CIDRs, Gateways, or DNS entries for the number of VMs specified"
+        echo "error: VMs: $NUM_VMS - CIDRs: ${#VM_CIDRS[@]}, Gateways: ${#VM_GATEWAYS[@]}, DNSs: ${#VM_DNSS[@]}"
+        exit 1
+    fi
+
     # for each VM we create, we need to clone the template on the node we want
     # to deploy the VM; templates are on each node already
     echo "> provisioning disks for VMs on nodes ...."
@@ -118,25 +127,27 @@ main() {
 
         # we index the node array by 0, and if we allocate more VMs than
         # nodes, we need to spread the VMs evenly across the nodes
-        node_id=$((v % NUM_VMS))
+        node_id=$((v % ${#all_nodes[@]}))
         tnode=${all_nodes[$node_id]}
-        vm_cidr=${VM_CIDRS[$node_id]}
+        vm_cidr=${VM_CIDRS[$v]}
+        vm_gateway=${VM_GATEWAYS[$v]}
+        vm_dns=${VM_DNSS[$v]}
 
         os_disk_name=${vm_name}-os-disk
         if ! clone_and_resize "${tnode}" "${STORAGE_POOL}" "${template_img}" "${os_disk_name}" "${VM_OS_DISK_GB}"; then
-            echo "error: failed to clone template image on node and resize"
+            echo "error: failed to clone template image on '${tnode}' and resize"
             return 1
         fi
 
         data_disk_name=${vm_name}-data-disk
         data_disk_fmt="raw"
         if ! create_disk "${tnode}" "${STORAGE_POOL}" "${data_disk_name}" "${VM_DATA_DISK_GB}" "$data_disk_fmt"; then
-            echo "error: failed to create data disk on node '${node}' in pool '${STOARGE_POOL}' size '${VM_DATA_DISK_GB}G'"
+            echo "error: failed to create data disk on node '${tnode}' in pool '${STOARGE_POOL}' size '${VM_DATA_DISK_GB}G'"
             return 1
         fi
 
         # create VM's cloudconfig iso
-        cc_args=( "${tnode}" "${STORAGE_POOL}" "${vm_name}" "${vm_cidr}" "${VM_GATEWAY}" "${VM_DNS}" )
+        cc_args=( "${tnode}" "${STORAGE_POOL}" "${vm_name}" "${vm_cidr}" "${vm_gateway}" "${vm_dns}" )
         if ! create_vm_cloudconfig "${cc_args[@]}"; then
             echo "error: failed to create cloud-init configuration ISO for ${vm_name} on ${tnode}"
             return 1
@@ -150,7 +161,7 @@ main() {
         numa_node=$(find_next_numa_node "$tnode")
         #shellcheck disable=SC2181
         if [ "$?" != "0" ]; then
-            echo "error: failed to find next numa node to use on node '$tnode'"
+            echo "error: failed to find next numa node to use on node '${tnode}'"
             return 1
         fi
 
@@ -161,11 +172,14 @@ main() {
             "${numa_node}" "${BRIDGE_NAME}" "${cc_iso_vol}"
         )
         if ! launch_vm "${launch_args[@]}"; then
-            echo "error: failed to launch VM '$vm_name' on node '$node'"
+            echo "error: failed to launch VM '${vm_name}' on node '${node}'"
             return 1
         fi
 
     done
+
+    echo "> Waiting for cluster..."
+    sleep 5
 
     show_cluster_status
 }
